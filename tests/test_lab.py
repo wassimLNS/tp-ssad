@@ -222,6 +222,52 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.post('/api/messages',recipient='bob',algorithm='hill',params={'matrix':[[2,0],[0,2]]},text='HELLO').status_code,400)
         self.assertEqual(self.post('/api/messages',recipient='alice',algorithm='caesar',params={},text='HELLO').status_code,400)
 
+    def test_password_changes_persist_update_attack_and_preserve_other_formats(self):
+        server.save_progress('alice',0,3)
+        server.save_progress('alice',2,7)
+        with server.db() as c:
+            c.execute("UPDATE users SET failures=9,blocked=1,block_reason='test' WHERE name='alice'")
+        result=self.post('/api/passwords',user='alice',kind=2,password='ab*')
+        self.assertEqual(result.status_code,200)
+        self.assertEqual(server.status('alice')['length'],3)
+        self.assertFalse(server.status('alice')['blocked'])
+        self.assertEqual(server.status('alice')['failures'],0)
+        self.assertEqual(server.status('alice')['progress'],{'0':3})
+        server.init()
+        credentials=self.client.get('/api/state').get_json()['credentials']
+        self.assertEqual(credentials['alice'],['101','1234','ab*'])
+        self.assertEqual(credentials['bob'],server.DEMO['bob'])
+        self.assertEqual(self.post('/api/login',user='alice',kind=2,password='a+').get_json()['state'],'failure')
+        self.assertEqual(self.post('/api/login',user='alice',kind=0,password='101').get_json()['state'],'success')
+        self.post('/api/protection',user='alice',enabled=False)
+        job=self.run_job(2)
+        self.assertEqual((job['state'],job['found']),('success','ab*'))
+
+    def test_password_formats_and_change_during_attack(self):
+        invalid=[(0,'10'),(0,'102'),(1,'123'),(1,'1235'),(2,'a b'),(2,'é'),(2,''),(2,'a'*33),(True,'101')]
+        for kind,password in invalid:
+            self.assertEqual(self.post('/api/passwords',user='alice',kind=kind,password=password).status_code,400)
+        for kind,password in [(0,'000'),(1,'4444'),(2,'Z+9*')]:
+            self.assertEqual(self.post('/api/passwords',user='alice',kind=kind,password=password).status_code,200)
+            self.assertEqual(self.post('/api/login',user='alice',kind=kind,password=password).get_json()['state'],'success')
+        with patch('server.threading.Thread'):
+            jid=self.post('/api/attack',user='bob',kind=0).get_json()['id']
+        self.assertEqual(self.post('/api/passwords',user='bob',kind=0,password='000').status_code,400)
+        server.JOBS[jid]['state']='cancelled'
+
+    def test_reset_clears_all_cipher_messages_but_preserves_integrity(self):
+        self.assertEqual(self.client.delete('/api/messages').status_code,400)
+        self.post('/api/login',user='alice',kind=0,password='101')
+        self.post('/api/messages',recipient='bob',algorithm='caesar',params={},text='HELLO')
+        self.post('/api/integrity',recipient='bob',text='unchanged')
+        self.post('/api/logout')
+        self.post('/api/login',user='charlie',kind=0,password='110')
+        self.post('/api/messages',recipient='bob',algorithm='caesar',params={},text='OTHER')
+        self.assertEqual(self.client.delete('/api/messages').get_json()['deleted'],2)
+        with server.db() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM messages').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM integrity_messages').fetchone()[0],1)
+
     def test_integrity_delivery_sha256_tamper_and_restore(self):
         self.post('/api/login',user='alice',kind=0,password='101')
         original='Bonjour Bob, à 14 h !\n  Merci. '

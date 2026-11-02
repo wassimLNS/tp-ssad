@@ -1,0 +1,16 @@
+.password-editor-form{display:grid;grid-template-columns:1fr 1.2fr 1.5fr auto;gap:15px;align-items:end;margin-top:10px}
+.password-editor-form label{margin-top:10px;font-size:10px}
+.password-editor-form .primary{white-space:nowrap;padding:12px;font-size:11px}
+.password-editor p{font-size:11px;line-height:1.8}
+.conversation-actions{display:flex;gap:14px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
+.conversation-actions .danger{margin:0;font-size:10px}
+.inbox-card .card-top{flex-wrap:wrap}
+.weaknesses-card{margin-top:23px}
+.weaknesses-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.weakness-card{background:#f8fafb;border:1px solid var(--line);border-radius:8px;padding:18px}
+.weakness-card.selected{background:#eef7f4;border-color:#9dc8bd}
+.weakness-card h3{font-size:14px;margin:0 0 14px;color:#315c68}
+.weakness-card ul{padding-left:17px;margin:0;font-size:12px;line-height:1.9;color:#697f88}
+.weakness-card li+li{margin-top:11px}
+@media(max-width:1200px){.password-editor-form{grid-template-columns:1fr 1fr}.weaknesses-grid{grid-template-columns:1fr}}
+@media(max-width:650px){.password-editor-form{grid-template-columns:1fr}.password-editor-form .primary{text-align:center}.conversation-actions{gap:12px}}

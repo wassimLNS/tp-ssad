@@ -15,6 +15,10 @@ Ouvrir http://127.0.0.1:5000. Sur Windows, `lancer.bat` lance le serveur si Flas
 
 ## Comptes de démonstration
 
+Les valeurs ci-dessous sont les valeurs initiales. Dans l'authentification, ouvrir **Personnaliser les mots de passe** pour choisir un compte, un format et un nouveau secret. Les valeurs personnalisées persistent dans SQLite et les identifiants affichés dans l'interface sont mis à jour. Le format binaire reste limité à 3 caractères 0/1, le format numérique à 4 caractères 1/2/3/4 et le format étendu accepte 1 à 32 caractères ASCII imprimables sans espace. Sa nouvelle longueur est automatiquement utilisée par la force brute. L'interface rappelle que les longs secrets rendent cette recherche exponentiellement plus lente.
+
+Un changement conserve les deux autres mots de passe, débloque le compte, réinitialise ses compteurs et remet la recherche du format modifié au premier candidat. La modification est refusée pendant une attaque en cours sur le compte. Les secrets sont visibles et conservés en clair comme identifiants de démonstration personnalisables ; les comparaisons d'authentification utilisent leurs empreintes salées. Utiliser exclusivement des secrets fictifs pour ce laboratoire.
+
 - Alice : binaire `101` ; numérique `1234` ; étendu `a+`.
 - Bob : binaire `011` ; numérique `2341` ; étendu `b*`.
 - Charlie : binaire `110` ; numérique `3412` ; étendu `c1`.
@@ -43,6 +47,10 @@ Le premier dictionnaire est exactement `{0,1}³` (8 candidats), le deuxième `{1
 Les candidats sont produits à la demande avec `itertools.product` pour les suffixes (mémoire constante), avec préchargement du sel et de l'empreinte et sans accès SQLite par candidat quand les deux protections sont désactivées. Une reprise accède directement à la position sauvegardée, sans réénumérer les candidats précédents. La politique est revérifiée toutes les 128 propositions dans le mode sans protection ; les changements de protection sont refusés pendant une attaque. Avec l'une ou l'autre protection, chaque candidat utilise le même contrôle atomique que le formulaire. Durée réelle, nombre d'essais et débit sont affichés. La durée inclut les contrôles du backend, sans le délai de rafraîchissement de l'écran. L'optimisation ne supprime pas la croissance exponentielle : de longs secrets peuvent rester impossibles à épuiser dans un temps raisonnable.
 
 ## Conventions de chiffrement
+
+Dans la messagerie, une section présente les faiblesses des trois chiffrements, avec mise en évidence de l'algorithme sélectionné. Pour Hill, la récupération de la clé à partir de k² lettres connues est conditionnée à l'inversibilité de la matrice formée par les k blocs connus modulo 26. Les contraintes sur le déterminant et l'ambiguïté du remplissage sont également expliquées. Pour Playfair : fréquences de paires, fusion I/J et ambiguïté des X/Q ajoutés ; pour Caesar : petit espace de clés, fréquences conservées et récupération du décalage par une correspondance connue.
+
+Le bouton **Vider les messages** réinitialise toute la messagerie chiffrée pour les trois comptes. Les messages de l'onglet Intégrité et les comptes sont conservés. L'utilisateur doit être connecté pour effectuer cette réinitialisation.
 
 - Accents décomposés, majuscules A–Z uniquement ; espaces, chiffres et ponctuation retirés explicitement. Maximum 2 000 lettres par message.
 - Caesar : A=0, décalage 0–25 à droite ou à gauche ; signe inversé au déchiffrement.

@@ -41,12 +41,13 @@ def init():
         CREATE TABLE IF NOT EXISTS integrity_messages(id INTEGER PRIMARY KEY, sender TEXT, recipient TEXT, original_text TEXT, received_text TEXT, sent_hash TEXT, created REAL);
         CREATE TABLE IF NOT EXISTS attack_progress(name TEXT, kind INTEGER, next_index INTEGER DEFAULT 0, PRIMARY KEY(name,kind));''')
         columns = {r['name'] for r in c.execute('PRAGMA table_info(users)')}
-        for column, definition in [('speed_protection','INTEGER DEFAULT 0'),('block_reason',"TEXT DEFAULT ''"),('recent_attempts',"TEXT DEFAULT '[]'")]:
+        for column, definition in [('speed_protection','INTEGER DEFAULT 0'),('block_reason',"TEXT DEFAULT ''"),('recent_attempts',"TEXT DEFAULT '[]'"),('demo_passwords','TEXT')]:
             if column not in columns:
                 c.execute(f'ALTER TABLE users ADD COLUMN {column} {definition}')
         for name, passwords in DEMO.items():
             salt = secrets.token_hex(16)
             c.execute('INSERT OR IGNORE INTO users(name,salt,hashes,length) VALUES(?,?,?,?)',(name,salt,json.dumps([digest(salt,p) for p in passwords]),len(passwords[2])))
+            c.execute('UPDATE users SET demo_passwords=? WHERE name=? AND demo_passwords IS NULL',(json.dumps(passwords),name))
 
 def user(name):
     with db() as c: return c.execute('SELECT * FROM users WHERE name=?',(name,)).fetchone()
@@ -148,7 +149,30 @@ def bad(e): return jsonify(error=str(e)),400
 def index(): return send_from_directory('static','index.html')
 
 @app.get('/api/state')
-def state(): return jsonify(users=[status(n) for n in DEMO], current=session.get('user'), alphabet=ALPHABET, credentials=DEMO)
+def state(): return jsonify(users=[status(n) for n in DEMO], current=session.get('user'), alphabet=ALPHABET, credentials={n:json.loads(user(n)['demo_passwords']) for n in DEMO})
+
+@app.post('/api/passwords')
+def change_demo_password():
+    d=request.get_json(); name=d.get('user'); status(name)
+    kind=d.get('kind'); password=d.get('password')
+    if type(kind) is not int or kind not in (0,1,2): raise ValueError('Type de mot de passe invalide.')
+    if not isinstance(password,str): raise ValueError('Saisissez un mot de passe.')
+    if kind==0 and (len(password)!=3 or any(c not in '01' for c in password)):
+        raise ValueError('Binaire : exactement 3 caractères parmi 0 et 1.')
+    if kind==1 and (len(password)!=4 or any(c not in '1234' for c in password)):
+        raise ValueError('Numérique : exactement 4 caractères parmi 1, 2, 3 et 4.')
+    if kind==2 and (not 1<=len(password)<=32 or any(c not in ALPHABET for c in password)):
+        raise ValueError('Étendu : 1 à 32 caractères ASCII imprimables, sans espace.')
+    with LOCK:
+        if any(j['state']=='running' and j['user']==name for j in JOBS.values()): raise ValueError('Arrêtez l’attaque avant de modifier le mot de passe.')
+        u=user(name); passwords=json.loads(u['demo_passwords']); hashes=json.loads(u['hashes'])
+        passwords[kind]=password; hashes[kind]=digest(u['salt'],password)
+        with db() as c:
+            c.execute("UPDATE users SET demo_passwords=?,hashes=?,length=?,failures=0,until=0,blocked=0,block_reason='',recent_attempts='[]' WHERE name=?",(json.dumps(passwords),json.dumps(hashes),len(passwords[2]),name))
+            c.execute('DELETE FROM attack_progress WHERE name=? AND kind=?',(name,kind))
+        for j in JOBS.values():
+            if j['user']==name: j['claimed']=True
+    return jsonify(ok=True,account=status(name))
 
 @app.post('/api/protection')
 def protection():
@@ -224,9 +248,13 @@ def authenticated():
     if session.get('user') not in DEMO: raise ValueError('Connectez-vous pour accéder à la messagerie.')
     return session['user']
 
-@app.route('/api/messages',methods=['GET','POST'])
+@app.route('/api/messages',methods=['GET','POST','DELETE'])
 def messages():
     name=authenticated()
+    if request.method=='DELETE':
+        with db() as c:
+            count=c.execute('DELETE FROM messages').rowcount
+        return jsonify(ok=True,deleted=count)
     if request.method=='GET':
         with db() as c:
             rows=c.execute('SELECT * FROM messages WHERE sender=? OR recipient=? ORDER BY id DESC',(name,name)).fetchall()

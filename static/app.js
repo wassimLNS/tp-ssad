@@ -31,7 +31,7 @@ function renderDictionary(cursor){
   $('#dictionary-count').textContent=`${total} candidats · ordre d’essai`;
   $('#dictionary-list').replaceChildren(...items);$('#dictionary-hint').textContent=cursor<total?`Suivant : ${items[cursor].textContent}`:'Dictionnaire épuisé.';
 }
-async function load(){state=await api('/api/state');renderAccount();return state;}
+async function load(){state=await api('/api/state');renderAccount();renderCredentials();syncPasswordEditor();return state;}
 function renderAccount(){
   const u=account();$('#users').replaceChildren();
   for(const name of Object.keys(names)){const b=el('button','user-button'+(name===selected?' selected':''));b.type='button';b.setAttribute('aria-pressed',name===selected);b.append(el('span','avatar',names[name][0]),document.createTextNode(names[name]));b.disabled=!!activeJob;b.onclick=()=>{selected=name;$('#user').value=name;$('#password').value='';renderAccount();};$('#users').append(b);}
@@ -83,6 +83,7 @@ function cipherParams(){
   }else{
     const l=el('label','','Dimension de la matrice');l.htmlFor='dimension';const s=el('select');s.id='dimension';for(const n of [2,3,4]){const o=el('option','',`${n} × ${n}`);o.value=n;s.append(o);}const m=el('div','matrix');m.id='matrix';const reset=el('button','text-button','Rétablir la matrice par défaut');reset.type='button';reset.style.marginTop='10px';reset.onclick=()=>renderMatrix(Number(s.value));s.onchange=()=>renderMatrix(Number(s.value));box.append(l,s,m,reset);renderMatrix(2);$('#cipher-warning').textContent='Faiblesse : la transformation est linéaire et vulnérable aux textes connus. La matrice doit être inversible modulo 26.';
   }
+  highlightWeakness();
 }
 function params(){
   switch($('#algorithm').value){case 'caesar':return{shift:Number($('#shift').value),direction:$('#direction').value};case 'playfair':return{key:$('#key').value};default:const n=Number($('#dimension').value),v=[...$('#matrix').children].map(i=>Number(i.value));return{matrix:Array.from({length:n},(_,i)=>v.slice(i*n,(i+1)*n))};}
@@ -142,4 +143,5 @@ $('#refresh').onclick=safe(refreshMessages);
 $('#message-form').onsubmit=safe(async e=>{e.preventDefault();$('#send').disabled=true;try{const r=await api('/api/messages',{recipient:$('#recipient').value,algorithm:$('#algorithm').value,params:params(),text:$('#message-text').value});trace(r.trace,`Chiffrement · ${$('#algorithm').value.toUpperCase()}`);await refreshMessages();toast('Message chiffré et envoyé.');}finally{$('#send').disabled=false;}});
 setupAttackPanel();
 setupIntegrityPanel();
+setupDemoControls();
 safe(async()=>{await load();renderCredentials();cipherParams();view(state.current?'messages':'auth');setInterval(poll,600);setInterval(()=>{if(state.current&&!$('#messages-view').hidden)refreshMessages().catch(()=>{});},5000);})();
