@@ -38,6 +38,7 @@ def init():
     with db() as c:
         c.executescript('''CREATE TABLE IF NOT EXISTS users(name TEXT PRIMARY KEY, salt TEXT, hashes TEXT, length INTEGER, failures INTEGER DEFAULT 0, until REAL DEFAULT 0, blocked INTEGER DEFAULT 0, protection INTEGER DEFAULT 1);
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, sender TEXT, recipient TEXT, algorithm TEXT, params TEXT, ciphertext TEXT, created REAL);
+        CREATE TABLE IF NOT EXISTS integrity_messages(id INTEGER PRIMARY KEY, sender TEXT, recipient TEXT, original_text TEXT, received_text TEXT, sent_hash TEXT, created REAL);
         CREATE TABLE IF NOT EXISTS attack_progress(name TEXT, kind INTEGER, next_index INTEGER DEFAULT 0, PRIMARY KEY(name,kind));''')
         columns = {r['name'] for r in c.execute('PRAGMA table_info(users)')}
         for column, definition in [('speed_protection','INTEGER DEFAULT 0'),('block_reason',"TEXT DEFAULT ''"),('recent_attempts',"TEXT DEFAULT '[]'")]:
@@ -242,6 +243,54 @@ def decrypt(mid):
     with db() as c: m=c.execute('SELECT * FROM messages WHERE id=? AND recipient=?',(mid,name)).fetchone()
     if m is None: raise ValueError('Seul le destinataire peut déchiffrer ce message.')
     return jsonify(trace=transform(m['ciphertext'],m['algorithm'],json.loads(m['params']),True))
+
+def integrity_result(m):
+    data=dict(m)
+    data['received_hash']=hashlib.sha256(m['received_text'].encode('utf-8')).hexdigest()
+    data['valid']=secrets.compare_digest(m['sent_hash'],data['received_hash'])
+    return data
+
+def integrity_received(mid):
+    name=authenticated()
+    with db() as c:
+        m=c.execute('SELECT * FROM integrity_messages WHERE id=? AND recipient=?',(mid,name)).fetchone()
+    if m is None: raise ValueError('Seul le destinataire peut vérifier ou modifier la copie reçue.')
+    return m
+
+@app.route('/api/integrity',methods=['GET','POST'])
+def integrity_messages():
+    name=authenticated()
+    if request.method=='GET':
+        with db() as c:
+            rows=c.execute('SELECT * FROM integrity_messages WHERE sender=? OR recipient=? ORDER BY id DESC',(name,name)).fetchall()
+        return jsonify(messages=[integrity_result(m) for m in rows])
+    d=request.get_json(); recipient=d.get('recipient'); text=d.get('text')
+    if recipient not in DEMO or recipient==name: raise ValueError('Choisissez un autre destinataire.')
+    if not isinstance(text,str) or not text.strip() or len(text)>4000: raise ValueError('Saisissez un message de 1 à 4 000 caractères.')
+    sent_hash=hashlib.sha256(text.encode('utf-8')).hexdigest()
+    with db() as c:
+        cur=c.execute('INSERT INTO integrity_messages(sender,recipient,original_text,received_text,sent_hash,created) VALUES(?,?,?,?,?,?)',(name,recipient,text,text,sent_hash,time.time()))
+        mid=cur.lastrowid
+        m=c.execute('SELECT * FROM integrity_messages WHERE id=?',(mid,)).fetchone()
+    return jsonify(message=integrity_result(m))
+
+@app.post('/api/integrity/<int:mid>/verify')
+def integrity_verify(mid):
+    return jsonify(message=integrity_result(integrity_received(mid)))
+
+@app.post('/api/integrity/<int:mid>/tamper')
+def integrity_tamper(mid):
+    m=integrity_received(mid); d=request.get_json()
+    if d.get('restore') is True:
+        text=m['original_text']
+    else:
+        text=d.get('text')
+        if not isinstance(text,str) or len(text)>4000: raise ValueError('Maximum : 4 000 caractères dans la copie reçue.')
+        if text==m['original_text']: raise ValueError('Modifiez le message pour simuler une altération.')
+    with db() as c:
+        c.execute('UPDATE integrity_messages SET received_text=? WHERE id=?',(text,mid))
+        m=c.execute('SELECT * FROM integrity_messages WHERE id=?',(mid,)).fetchone()
+    return jsonify(message=integrity_result(m))
 
 @app.after_request
 def headers(response):

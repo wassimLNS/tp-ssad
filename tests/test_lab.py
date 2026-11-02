@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import time
 import unittest
@@ -30,6 +31,23 @@ class CipherTests(unittest.TestCase):
             t=transform('HELLO WORLD','hill',{'matrix':m})
             self.assertEqual(transform(t['result'],'hill',{'matrix':m},True)['result'],t['prepared'])
         with self.assertRaises(ValueError):inverse([[2,0],[0,2]])
+
+    def test_hill_trace_distinguishes_key_inverse_and_operation(self):
+        matrices=[[[3,3],[2,5]],[[6,24,1],[13,16,10],[20,17,15]],[[1,2,3,4],[0,1,2,3],[0,0,1,2],[0,0,0,1]]]
+        for m in matrices:
+            encrypted=transform('HELLO','hill',{'matrix':m})
+            decrypted=transform(encrypted['result'],'hill',{'matrix':m},True)
+            self.assertEqual(encrypted['key_matrix'],m)
+            self.assertEqual(decrypted['key_matrix'],m)
+            self.assertEqual(decrypted['matrix'],inverse(m))
+            self.assertEqual(encrypted['matrix'],m)
+            self.assertNotEqual(decrypted['key_matrix'],decrypted['inverse'])
+            self.assertIn('K⁻¹ × v',decrypted['steps'][0])
+            calc=decrypted['inverse_calculation']
+            self.assertEqual((calc['det_mod']*calc['scalar_inverse'])%26,1)
+            self.assertEqual([[calc['scalar_inverse']*x%26 for x in r] for r in calc['adjugate']],decrypted['inverse'])
+        calc=transform('HELP','hill',{'matrix':matrices[0]})['inverse_calculation']
+        self.assertEqual((calc['determinant'],calc['scalar_inverse'],calc['adjugate']),(9,3,[[5,-3],[-2,3]]))
 
 
 class BackendTests(unittest.TestCase):
@@ -203,6 +221,47 @@ class BackendTests(unittest.TestCase):
         self.post('/api/login',user='alice',kind=0,password='101')
         self.assertEqual(self.post('/api/messages',recipient='bob',algorithm='hill',params={'matrix':[[2,0],[0,2]]},text='HELLO').status_code,400)
         self.assertEqual(self.post('/api/messages',recipient='alice',algorithm='caesar',params={},text='HELLO').status_code,400)
+
+    def test_integrity_delivery_sha256_tamper_and_restore(self):
+        self.post('/api/login',user='alice',kind=0,password='101')
+        original='Bonjour Bob, à 14 h !\n  Merci. '
+        sent=self.post('/api/integrity',recipient='bob',text=original).get_json()['message']
+        mid=sent['id']; expected=hashlib.sha256(original.encode('utf-8')).hexdigest()
+        self.assertEqual(sent['sent_hash'],expected)
+        self.assertEqual(sent['received_hash'],expected)
+        self.assertEqual(sent['received_text'],original)
+        self.assertTrue(sent['valid'])
+        self.assertEqual(self.post(f'/api/integrity/{mid}/tamper',text='changed').status_code,400)
+        self.post('/api/logout')
+        self.post('/api/login',user='bob',kind=0,password='011')
+        received=self.client.get('/api/integrity').get_json()['messages'][0]
+        self.assertEqual(received['sent_hash'],expected)
+        verified=self.post(f'/api/integrity/{mid}/verify').get_json()['message']
+        self.assertTrue(verified['valid'])
+        changed=self.post(f'/api/integrity/{mid}/tamper',text=original+'!').get_json()['message']
+        self.assertFalse(changed['valid'])
+        self.assertEqual(changed['sent_hash'],expected)
+        self.assertEqual(changed['original_text'],original)
+        self.assertNotEqual(changed['received_hash'],expected)
+        server.init()  # Modification survives a restart.
+        self.assertFalse(self.post(f'/api/integrity/{mid}/verify').get_json()['message']['valid'])
+        restored=self.post(f'/api/integrity/{mid}/tamper',restore=True).get_json()['message']
+        self.assertTrue(restored['valid'])
+        self.assertEqual(restored['received_text'],original)
+
+    def test_integrity_access_validation_and_known_hash(self):
+        self.assertEqual(self.client.get('/api/integrity').status_code,400)
+        self.post('/api/login',user='alice',kind=0,password='101')
+        for text in ['', '   ', 'a'*4001, 123]:
+            self.assertEqual(self.post('/api/integrity',recipient='bob',text=text).status_code,400)
+        self.assertEqual(self.post('/api/integrity',recipient='alice',text='abc').status_code,400)
+        sent=self.post('/api/integrity',recipient='bob',text='abc').get_json()['message']
+        self.assertEqual(sent['sent_hash'],'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+        self.post('/api/logout')
+        self.post('/api/login',user='charlie',kind=0,password='110')
+        self.assertEqual(self.client.get('/api/integrity').get_json()['messages'],[])
+        self.assertEqual(self.post('/api/integrity/1/verify').status_code,400)
+        self.assertEqual(self.post('/api/integrity/1/tamper',text='abc!').status_code,400)
 
 
 if __name__=='__main__':unittest.main()

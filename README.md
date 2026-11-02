@@ -1,6 +1,6 @@
 # Cipher Lab — SSAD
 
-Application pédagogique locale : backend Python/Flask, base SQLite persistante et interface en français. Partie intégrité volontairement réservée à la suite du projet.
+Application pédagogique locale : backend Python/Flask, base SQLite persistante et interface en français. Authentification, chiffrement et démonstration d'intégrité SHA-256.
 
 ## Démarrage
 
@@ -49,6 +49,14 @@ Les candidats sont produits à la demande avec `itertools.product` pour les suff
 - Playfair : grille 5×5, clé MONARCHY par défaut, fusion I/J, paires répétées séparées par X (Q pour deux X), complément final de même règle. Les remplissages sont conservés au déchiffrement car leur suppression serait ambiguë.
 - Hill : vecteurs colonnes, calcul modulo 26, dimensions 2–4. Les matrices doivent avoir un déterminant premier avec 26. Clés inversibles par défaut pour chaque dimension. Complément final X conservé au déchiffrement.
 - La base stocke le texte chiffré et les paramètres, sans stocker le texte clair. Le serveur réserve le déchiffrement au destinataire. Les explications du chiffrement sont retournées à l'envoi ; celles du déchiffrement sont calculées à la demande.
+
+## Intégrité SHA-256
+
+Après connexion, ouvrir l'onglet **Intégrité**, choisir un destinataire et envoyer un message témoin. Cet espace est indépendant des chiffrements classiques : il conserve le texte exact, y compris accents, espaces, ponctuation et retours à la ligne (maximum 4 000 caractères). Le backend calcule SHA-256 sur les octets UTF-8 et enregistre une copie originale, une copie reçue et le hash envoyé. Les données persistent dans la table SQLite `integrity_messages`.
+
+Se connecter ensuite au compte destinataire et sélectionner le message. L'interface affiche le message et le hash à l'envoi, le message reçu, le hash reçu et le hash recalculé. **Vérifier l'intégrité** compare les empreintes dans le backend. **Simuler la modification** utilise le texte modifié dans le champ prévu ; si rien n'est modifié, le bouton ajoute automatiquement « [modifié] ». Le hash envoyé reste intact : une erreur rouge signale que le hash recalculé ne correspond plus au hash reçu. **Rétablir le message original** restaure la copie reçue et fait repasser le contrôle au vert. Seul le destinataire peut vérifier, altérer ou restaurer sa copie ; les autres comptes n'accèdent pas au message.
+
+Cette expérience suppose que le hash de référence est fiable. Un hash SHA-256 seul n'authentifie pas l'expéditeur et ne protège pas contre un attaquant qui pourrait remplacer simultanément le message et le hash.
 
 ## Limites pédagogiques
 

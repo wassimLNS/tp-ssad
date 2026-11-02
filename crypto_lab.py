@@ -13,12 +13,16 @@ def det(m):
     return sum((-1)**j * m[0][j] * det([r[:j]+r[j+1:] for r in m[1:]]) for j in range(len(m)))
 
 
+def adjugate(m):
+    n = len(m)
+    return [[(-1)**(i+j) * det([r[:i]+r[i+1:] for k,r in enumerate(m) if k != j]) for j in range(n)] for i in range(n)]
+
+
 def inverse(m):
     d = det(m) % 26
     if math.gcd(d, 26) != 1:
         raise ValueError('Matrice non inversible modulo 26 : le déterminant doit être premier avec 26.')
-    n = len(m)
-    return [[(pow(d, -1, 26) * (-1)**(i+j) * det([r[:i]+r[i+1:] for k,r in enumerate(m) if k != j])) % 26 for j in range(n)] for i in range(n)]
+    return [[(pow(d, -1, 26) * x) % 26 for x in row] for row in adjugate(m)]
 
 
 def transform(text, algorithm, params, decrypt=False):
@@ -93,14 +97,28 @@ def transform(text, algorithm, params, decrypt=False):
             raise ValueError('La longueur du texte Hill doit être un multiple de la dimension.')
         padding = (-len(source))%n
         source += 'X'*padding
-        info.update(matrix=used, inverse=inv, padding=padding, prepared=source)
+        determinant = det(m)
+        d = determinant % 26
+        scalar = pow(d, -1, 26)
+        determinant_formula = f'{m[0][0]} × {m[1][1]} − {m[0][1]} × {m[1][0]} = ' if n == 2 else ''
+        info.update(matrix=used, key_matrix=m, inverse=inv, operation='decrypt' if decrypt else 'encrypt', padding=padding, prepared=source,
+                    inverse_calculation={
+                        'determinant':determinant, 'det_mod':d, 'scalar_inverse':scalar,
+                        'adjugate':adjugate(m),
+                        'steps':[
+                            f'Déterminant : det(K) = {determinant_formula}{determinant} ≡ {d} (mod 26).',
+                            f'PGCD({d}, 26) = 1 : K est inversible. L’inverse de {d} modulo 26 est {scalar}, car {d} × {scalar} = {d*scalar} ≡ 1 (mod 26).',
+                            'On calcule la comatrice (cofacteurs signés), puis on la transpose pour obtenir adj(K).',
+                            f'K⁻¹ = {scalar} × adj(K) mod 26 : chaque coefficient est multiplié par {scalar}, puis réduit modulo 26.'
+                        ]})
         result = ''
         for i in range(0,len(source),n):
             block = source[i:i+n]; v = [ord(c)-65 for c in block]
             sums = [sum(a*b for a,b in zip(row,v)) for row in used]
             out = ''.join(chr(x%26+65) for x in sums)
             result += out
-            steps.append(f'{block} → vecteur {v} ; K × v = {sums} ; mod 26 → {[x%26 for x in sums]} → {out}')
+            symbol = 'K⁻¹' if decrypt else 'K'
+            steps.append(f'{block} → vecteur {v} ; {symbol} × v = {sums} ; mod 26 → {[x%26 for x in sums]} → {out}')
         info['rule'] = 'Vecteurs colonnes, A=0…Z=25. C = K × P mod 26 ; P = K⁻¹ × C mod 26. Complément par X, conservé au déchiffrement.'
     else:
         raise ValueError('Algorithme inconnu.')

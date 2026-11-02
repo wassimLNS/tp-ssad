@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 let state, selected='alice', kind=0, activeJob=null, polling=false, lastTrace=null;
 let dictionaryKey='';
-const descriptions=[['3 caractères · alphabet {0, 1}','Dictionnaire exhaustif des 8 mots binaires possibles.',3,8],['4 caractères · alphabet {1, 2, 3, 4}','Dictionnaire exhaustif des 256 mots numériques possibles.',4,256],['Caractères ASCII : a–z, A–Z, 0–9 et ponctuation','Force brute exhaustive ; longueur connue, génération à la demande sans stocker tout l’espace de recherche.',2,8836]];
+const descriptions=[['3 caractères · alphabet {0, 1}','Dictionnaire exhaustif des 8 mots binaires possibles.',3,8],['4 caractères · alphabet {1, 2, 3, 4}','Dictionnaire exhaustif des 256 mots numériques possibles.',4,256],['Caractères ASCII : a–z, A–Z, 0–9 et ponctuation','Force brute exhaustive ; candidats générés à la demande.',2,8836]];
 const names={alice:'Alice',bob:'Bob',charlie:'Charlie'};
 const defaults={2:[[3,3],[2,5]],3:[[6,24,1],[13,16,10],[20,17,15]],4:[[1,2,3,4],[0,1,2,3],[0,0,1,2],[0,0,0,1]]};
 function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
@@ -51,6 +51,7 @@ function renderAccount(){
   const length=kind===2?u.length:d[2];
   $('.metrics > div:first-child').hidden=kind===2;$('.metrics').classList.toggle('extended',kind===2);
   $('#space').textContent=kind===2?'':d[3].toLocaleString('fr-FR');$('#length-info').textContent=`Longueur connue : ${length}`;$('#method').textContent=kind===2?'Force brute':'Dictionnaire';
+  $('#length-info').hidden=kind===2;
   const cursor=u.progress?.[String(kind)]||0;
   $('#run-attack').textContent=`▷ ${cursor?'Reprendre':'Lancer'} l’attaque par ${kind===2?'force brute':'dictionnaire'}`;
   $('#resume-info').textContent=cursor?`${cursor.toLocaleString('fr-FR')} candidat(s) déjà testés · reprise au candidat suivant.`:'La recherche commence au premier candidat.';
@@ -58,9 +59,11 @@ function renderAccount(){
   $('#logout').hidden=!state.current;
 }
 function view(which){
-  if(which==='messages'&&!state.current){toast('Connectez-vous pour accéder à la messagerie.');return;}
+  if(which!=='auth'&&!state.current){toast('Connectez-vous pour accéder à cet espace.');return;}
   $('#auth-view').hidden=which!=='auth';$('#messages-view').hidden=which!=='messages';$('#nav-auth').classList.toggle('active',which==='auth');$('#nav-msg').classList.toggle('active',which==='messages');
-  $('#breadcrumb').textContent=`ESPACE D’EXPÉRIMENTATION / ${which==='auth'?'AUTHENTIFICATION':'MESSAGERIE'}`;
+  $('#integrity-view').hidden=which!=='integrity';$('#nav-integrity').classList.toggle('active',which==='integrity');
+  $('#breadcrumb').textContent=`ESPACE D’EXPÉRIMENTATION / ${which==='auth'?'AUTHENTIFICATION':which==='integrity'?'INTÉGRITÉ':'MESSAGERIE'}`;
+  if(which==='integrity')openIntegrity();
   if(which==='messages'){$('#session-label').textContent=`Connecté en tant que ${names[state.current]}. Choisissez un destinataire et explorez les trois algorithmes.`;const previous=$('#recipient').value;$('#recipient').replaceChildren(...Object.keys(names).filter(n=>n!==state.current).map(n=>{const o=el('option','',names[n]);o.value=n;return o;}));if(previous!==state.current&&names[previous])$('#recipient').value=previous;refreshMessages().catch(e=>toast(e.message));}
 }
 function renderCredentials(){
@@ -84,11 +87,20 @@ function cipherParams(){
 function params(){
   switch($('#algorithm').value){case 'caesar':return{shift:Number($('#shift').value),direction:$('#direction').value};case 'playfair':return{key:$('#key').value};default:const n=Number($('#dimension').value),v=[...$('#matrix').children].map(i=>Number(i.value));return{matrix:Array.from({length:n},(_,i)=>v.slice(i*n,(i+1)*n))};}
 }
+function matrixView(matrix,label){
+  const card=el('div','matrix-explanation');card.append(el('strong','',label));
+  const grid=el('div','matrix-display');grid.style.gridTemplateColumns=`repeat(${matrix.length},minmax(28px,1fr))`;
+  matrix.flat().forEach(value=>grid.append(el('span','',String(value))));card.append(grid);return card;
+}
 function trace(t,title){
   lastTrace=t;$('#trace-title').textContent=title;const box=$('#trace-content');box.replaceChildren();box.append(el('p','',t.rule));
   box.append(el('p','',`Texte normalisé : ${t.normalized}`));if(t.prepared)box.append(el('p','',`Texte préparé : ${t.prepared}`));
   if(t.grid){const g=el('div','trace-grid');t.grid.flat().forEach(c=>g.append(el('span','',c)));box.append(g);}
-  if(t.matrix){box.append(el('p','',`Matrice utilisée : ${JSON.stringify(t.matrix)} · Inverse : ${JSON.stringify(t.inverse)}`));}
+  if(t.key_matrix){
+    const matrices=el('div','hill-matrices');matrices.append(matrixView(t.key_matrix,'Matrice clé K · chiffrement'),matrixView(t.inverse,'Matrice inverse K⁻¹ · déchiffrement'));box.append(matrices);
+    box.append(el('p','hill-operation',t.operation==='decrypt'?'Pour ce déchiffrement, on utilise K⁻¹ : P = K⁻¹ × C mod 26.':'Pour ce chiffrement, on utilise K : C = K × P mod 26.'));
+    if(t.inverse_calculation){const calc=t.inverse_calculation,explanation=el('section','inverse-explanation');explanation.append(el('strong','','Comment obtient-on K⁻¹ ?'));const list=el('ol');calc.steps.forEach(step=>list.append(el('li','',step)));explanation.append(list,matrixView(calc.adjugate,'Adjointe adj(K) · cofacteurs transposés'));box.append(explanation);}
+  }
   box.append(el('div','trace-result',t.result));const list=el('ol');t.steps.forEach(s=>list.append(el('li','',s)));box.append(list);$('#trace-panel').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 async function refreshMessages(){
@@ -124,9 +136,10 @@ async function poll(){
   }catch(e){toast(e.message);}finally{polling=false;}
 }
 $('#nav-auth').onclick=()=>view('auth');$('#nav-msg').onclick=()=>view('messages');
-$('#logout').onclick=safe(async()=>{await api('/api/logout',{});await load();lastTrace=null;$('#message-text').value='';$('#algorithm').value='caesar';cipherParams();$('#trace-title').textContent='L’algorithme, étape par étape';$('#trace-content').textContent='Envoyez ou déchiffrez un message pour explorer sa transformation.';$('#message-list').replaceChildren();view('auth');});
+$('#logout').onclick=safe(async()=>{await api('/api/logout',{});await load();lastTrace=null;clearIntegrity();$('#message-text').value='';$('#algorithm').value='caesar';cipherParams();$('#trace-title').textContent='L’algorithme, étape par étape';$('#trace-content').textContent='Envoyez ou déchiffrez un message pour explorer sa transformation.';$('#message-list').replaceChildren();view('auth');});
 $('#algorithm').onchange=cipherParams;
 $('#refresh').onclick=safe(refreshMessages);
 $('#message-form').onsubmit=safe(async e=>{e.preventDefault();$('#send').disabled=true;try{const r=await api('/api/messages',{recipient:$('#recipient').value,algorithm:$('#algorithm').value,params:params(),text:$('#message-text').value});trace(r.trace,`Chiffrement · ${$('#algorithm').value.toUpperCase()}`);await refreshMessages();toast('Message chiffré et envoyé.');}finally{$('#send').disabled=false;}});
 setupAttackPanel();
+setupIntegrityPanel();
 safe(async()=>{await load();renderCredentials();cipherParams();view(state.current?'messages':'auth');setInterval(poll,600);setInterval(()=>{if(state.current&&!$('#messages-view').hidden)refreshMessages().catch(()=>{});},5000);})();
