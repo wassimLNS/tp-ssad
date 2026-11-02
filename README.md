@@ -2,6 +2,11 @@
 
 Application pédagogique locale : backend Python/Flask, base SQLite persistante et interface en français. Authentification, chiffrement et démonstration d'intégrité SHA-256.
 
+## Guides détaillés
+
+- [README du code](README_CODE.md) : architecture, base de données, API, algorithmes et tests.
+- [README de l'interface](README_INTERFACE.md) : prise en main et scénario de démonstration.
+
 ## Démarrage
 
 Python 3.10 ou plus récent :
