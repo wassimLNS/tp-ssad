@@ -1,6 +1,7 @@
 'use strict';
 const $ = s => document.querySelector(s);
 let state, selected='alice', kind=0, activeJob=null, polling=false, lastTrace=null;
+let dictionaryKey='';
 const descriptions=[['3 caractères · alphabet {0, 1}','Dictionnaire exhaustif des 8 mots binaires possibles.',3,8],['4 caractères · alphabet {1, 2, 3, 4}','Dictionnaire exhaustif des 256 mots numériques possibles.',4,256],['Caractères ASCII : a–z, A–Z, 0–9 et ponctuation','Force brute exhaustive ; longueur connue, génération à la demande sans stocker tout l’espace de recherche.',2,8836]];
 const names={alice:'Alice',bob:'Bob',charlie:'Charlie'};
 const defaults={2:[[3,3],[2,5]],3:[[6,24,1],[13,16,10],[20,17,15]],4:[[1,2,3,4],[0,1,2,3],[0,0,1,2],[0,0,0,1]]};
@@ -10,24 +11,50 @@ function toast(text){$('#toast').textContent=text;clearTimeout(toastTimer);toast
 async function api(path,data,method){const r=await fetch(path,{method:method||(data?'POST':'GET'),headers:data?{'Content-Type':'application/json'}:{},body:data?JSON.stringify(data):undefined});const v=await r.json();if(!r.ok)throw Error(v.error||'Le serveur ne peut pas traiter cette demande.');return v;}
 function safe(fn){return async e=>{try{await fn(e);}catch(err){toast(err.message);}};}
 function account(){return state.users.find(u=>u.name===selected);}
+function setupAttackPanel(){
+  const row=el('div','protection-row speed-protection-row'),text=el('div'),toggle=el('input');
+  text.append(el('strong','','Détection de cadence inhumaine'),el('small','','Blocage · 3 tentatives en moins de 500 ms'));
+  toggle.type='checkbox';toggle.id='speed-protection';toggle.setAttribute('role','switch');toggle.setAttribute('aria-label','Activer la détection de cadence inhumaine');row.append(text,toggle);
+  $('.protection-row').after(row);
+  toggle.onchange=safe(async()=>{await api('/api/protection',{user:selected,setting:'speed_protection',enabled:toggle.checked});await load();});
+  const workspace=el('div','attack-workspace'),terminal=$('.terminal'),dictionary=el('aside','dictionary-panel');dictionary.id='dictionary-panel';dictionary.setAttribute('aria-label','Dictionnaire des candidats');
+  const title=el('strong','','Dictionnaire'),count=el('small');count.id='dictionary-count';const list=el('div','dictionary-list');list.id='dictionary-list';list.tabIndex=0;list.setAttribute('aria-label','Liste complète des candidats');const hint=el('p');hint.id='dictionary-hint';
+  dictionary.append(title,count,list,hint);terminal.before(workspace);workspace.append(terminal,dictionary);
+  const progress=el('p','field-help');progress.id='resume-info';$('#run-attack').before(progress);
+}
+function renderDictionary(cursor){
+  $('#dictionary-panel').hidden=kind===2;$('.attack-workspace').classList.toggle('no-dictionary',kind===2);
+  if(kind===2)return;
+  const key=`${selected}:${kind}:${cursor}`;if(dictionaryKey===key)return;dictionaryKey=key;
+  const alphabet=kind===0?'01':'1234',length=kind===0?3:4,total=alphabet.length**length;
+  const items=Array.from({length:total},(_,i)=>{let n=i,s='';for(let j=0;j<length;j++){s=alphabet[n%alphabet.length]+s;n=Math.floor(n/alphabet.length);}const item=el('span',i<cursor?'tried':i===cursor?'next':'',s);if(i===cursor)item.setAttribute('aria-label',`Prochain candidat : ${s}`);return item;});
+  $('#dictionary-count').textContent=`${total} candidats · ordre d’essai`;
+  $('#dictionary-list').replaceChildren(...items);$('#dictionary-hint').textContent=cursor<total?`Suivant : ${items[cursor].textContent}`:'Dictionnaire épuisé.';
+}
 async function load(){state=await api('/api/state');renderAccount();return state;}
 function renderAccount(){
   const u=account();$('#users').replaceChildren();
   for(const name of Object.keys(names)){const b=el('button','user-button'+(name===selected?' selected':''));b.type='button';b.setAttribute('aria-pressed',name===selected);b.append(el('span','avatar',names[name][0]),document.createTextNode(names[name]));b.disabled=!!activeJob;b.onclick=()=>{selected=name;$('#user').value=name;$('#password').value='';renderAccount();};$('#users').append(b);}
   $('#protection').checked=!!u.protection;$('#protection').disabled=!!activeJob;
+  $('#speed-protection').checked=!!u.speed_protection;$('#speed-protection').disabled=!!activeJob;
   $('#failure-label').textContent=`${u.failures} / 9`;
   $('#attempt-dots').replaceChildren(...Array.from({length:9},(_,i)=>el('i',i<u.failures?'used':'')));
   const wait=Math.ceil(u.remaining);
-  $('#account-state').textContent=u.blocked?'Compte bloqué après 9 échecs. Débloquez-le pour continuer.':wait>0?`Pause de sécurité · encore ${wait} s` :u.protection?`Protection active · ${3-u.failures%3} tentative(s) avant le prochain palier.`:'Protection désactivée · aucun nouveau palier de blocage.';
+  $('#account-state').textContent=u.blocked?`Compte bloqué. ${u.block_reason||'9 échecs de connexion.'} Débloquez-le pour continuer.`:wait>0?`Pause de sécurité · encore ${wait} s` :u.protection?`Protection active · ${3-u.failures%3} tentative(s) avant le prochain palier.`:'Rate limiting désactivé.';
+  $('#account-state').classList.toggle('blocked-reason',!!u.blocked);
   $('#unlock').hidden=!u.blocked;$('#unlock').disabled=!!activeJob;
   $('#login-button').disabled=!!activeJob||!!u.blocked||wait>0;
   $('#run-attack').disabled=!!activeJob||!!u.blocked||wait>0;
   $('#stop-attack').hidden=!activeJob;
   document.querySelectorAll('[data-kind]').forEach(b=>{b.classList.toggle('selected',Number(b.dataset.kind)===kind);b.setAttribute('aria-pressed',Number(b.dataset.kind)===kind);b.disabled=!!activeJob;});
   const d=descriptions[kind];$('#type-info').textContent=d[0];$('#attack-description').textContent=d[1];
-  const length=kind===2?u.length:d[2];const count=kind===2?94**length:d[3];
-  $('#space').textContent=count.toLocaleString('fr-FR');$('#length-info').textContent=`Longueur connue : ${length}`;$('#method').textContent=kind===2?'Force brute':'Dictionnaire';
-  $('#run-attack').textContent=kind===2?'▷ Lancer l’attaque par force brute':'▷ Lancer l’attaque par dictionnaire';
+  const length=kind===2?u.length:d[2];
+  $('.metrics > div:first-child').hidden=kind===2;$('.metrics').classList.toggle('extended',kind===2);
+  $('#space').textContent=kind===2?'':d[3].toLocaleString('fr-FR');$('#length-info').textContent=`Longueur connue : ${length}`;$('#method').textContent=kind===2?'Force brute':'Dictionnaire';
+  const cursor=u.progress?.[String(kind)]||0;
+  $('#run-attack').textContent=`▷ ${cursor?'Reprendre':'Lancer'} l’attaque par ${kind===2?'force brute':'dictionnaire'}`;
+  $('#resume-info').textContent=cursor?`${cursor.toLocaleString('fr-FR')} candidat(s) déjà testés · reprise au candidat suivant.`:'La recherche commence au premier candidat.';
+  renderDictionary(cursor);
   $('#logout').hidden=!state.current;
 }
 function view(which){
@@ -76,7 +103,7 @@ document.querySelectorAll('[data-kind]').forEach(b=>b.onclick=()=>{kind=Number(b
 $('#reveal').onclick=()=>{const p=$('#password');p.type=p.type==='password'?'text':'password';$('#reveal').setAttribute('aria-label',p.type==='password'?'Afficher le mot de passe':'Masquer le mot de passe');};
 $('#protection').onchange=safe(async()=>{await api('/api/protection',{user:selected,enabled:$('#protection').checked});await load();});
 $('#unlock').onclick=safe(async()=>{await api('/api/unlock',{user:selected});await load();toast('Compte débloqué. Le compteur est remis à zéro.');});
-$('#login-form').onsubmit=safe(async e=>{e.preventDefault();const r=await api('/api/login',{user:selected,kind,password:$('#password').value});await load();if(r.state==='success'){$('#password').value='';view('messages');toast(`Bienvenue, ${names[state.current]}.`);}else toast(r.state==='blocked'?'Compte bloqué.':r.state==='cooldown'?'Trois échecs : pause de 10 secondes.':'Mot de passe incorrect.');});
+$('#login-form').onsubmit=safe(async e=>{e.preventDefault();const r=await api('/api/login',{user:selected,kind,password:$('#password').value});await load();if(r.state==='success'){$('#password').value='';view('messages');toast(`Bienvenue, ${names[state.current]}.`);}else toast(r.state==='blocked'?`Compte bloqué. ${r.account.block_reason}`:r.state==='cooldown'?'Trois échecs : pause de 10 secondes.':'Mot de passe incorrect.');});
 $('#run-attack').onclick=safe(async()=>{
   const r=await api('/api/attack',{user:selected,kind});activeJob=r.id;$('#attack-badge').textContent='EN COURS';renderAccount();
 });
@@ -86,10 +113,14 @@ async function poll(){
   try{
     if(activeJob){const j=await api(`/api/attack/${activeJob}`);const stateLabels={running:'En cours',success:'Mot de passe trouvé',cooldown:'Pause de sécurité · 10 s',blocked:'Compte bloqué',cancelled:'Attaque arrêtée',exhausted:'Recherche terminée',error:'Erreur serveur'};
       $('#attack-badge').textContent=stateLabels[j.state].toUpperCase();
-      $('#attack-log').textContent=`> Cible locale : ${names[j.user]}\n> ${stateLabels[j.state]}\n> Tentatives : ${j.attempts.toLocaleString('fr-FR')}\n> Dernier candidat : ${j.candidate||'—'}${j.elapsed?`\n> Durée : ${(j.elapsed*1000).toFixed(2)} ms · ${Math.round(j.attempts/Math.max(j.elapsed,.000001)).toLocaleString('fr-FR')} essais/s`:''}${j.found?`\n> Mot de passe trouvé : ${j.found}\n> Utilisez-le dans le formulaire de connexion.`:''}`;
+      $('#attack-log').textContent=`> Cible locale : ${names[j.user]}\n> ${stateLabels[j.state]}\n> Reprise à la position : ${(j.start_index+1).toLocaleString('fr-FR')}\n> Tentatives de cette exécution : ${j.attempts.toLocaleString('fr-FR')}\n> Dernier candidat : ${j.candidate||'—'}${j.elapsed?`\n> Durée : ${(j.elapsed*1000).toFixed(2)} ms · ${Math.round(j.attempts/Math.max(j.elapsed,.000001)).toLocaleString('fr-FR')} essais/s`:''}${j.found?`\n> Mot de passe trouvé : ${j.found}\n> Connexion automatique…`:''}`;
+      if(j.state==='success'){
+        await api(`/api/attack/${activeJob}/connect`,{});activeJob=null;await load();$('#password').value='';view('messages');toast(`Mot de passe trouvé : ${j.found}. Connexion automatique à ${names[j.user]}.`);return;
+      }
       if(j.state!=='running')activeJob=null;
     }
     await load();
+    if(account().blocked&&account().block_reason&&!$('#attack-log').textContent.includes(account().block_reason))$('#attack-log').textContent+=`\n> Motif : ${account().block_reason}`;
   }catch(e){toast(e.message);}finally{polling=false;}
 }
 $('#nav-auth').onclick=()=>view('auth');$('#nav-msg').onclick=()=>view('messages');
@@ -97,4 +128,5 @@ $('#logout').onclick=safe(async()=>{await api('/api/logout',{});await load();las
 $('#algorithm').onchange=cipherParams;
 $('#refresh').onclick=safe(refreshMessages);
 $('#message-form').onsubmit=safe(async e=>{e.preventDefault();$('#send').disabled=true;try{const r=await api('/api/messages',{recipient:$('#recipient').value,algorithm:$('#algorithm').value,params:params(),text:$('#message-text').value});trace(r.trace,`Chiffrement · ${$('#algorithm').value.toUpperCase()}`);await refreshMessages();toast('Message chiffré et envoyé.');}finally{$('#send').disabled=false;}});
+setupAttackPanel();
 safe(async()=>{await load();renderCredentials();cipherParams();view(state.current?'messages':'auth');setInterval(poll,600);setInterval(()=>{if(state.current&&!$('#messages-view').hidden)refreshMessages().catch(()=>{});},5000);})();

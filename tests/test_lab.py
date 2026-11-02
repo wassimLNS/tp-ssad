@@ -66,7 +66,8 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(self.post('/api/login',user='alice',kind=2,password='a+').get_json()['state'],'success')
 
     def run_job(self,kind,name='alice'):
-        job={'id':'test','user':name,'kind':kind,'state':'running','attempts':0,'candidate':'','found':None,'elapsed':0,'cancel':False}
+        start=server.status(name)['progress'].get(str(kind),0)
+        job={'id':'test','user':name,'kind':kind,'state':'running','attempts':0,'candidate':'','found':None,'elapsed':0,'cancel':False,'start_index':start}
         server.worker(job)
         return job
 
@@ -88,6 +89,90 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.run_job(0)['attempts'],6)
         self.assertEqual(self.run_job(1)['attempts'],28)
         self.assertEqual(len(server.ALPHABET),94)
+
+    def test_resume_after_cooldown_without_repeating_candidates(self):
+        now=1000
+        with patch('server.time.time',side_effect=lambda:now):
+            first=self.run_job(0)
+            self.assertEqual((first['state'],first['candidate'],first['attempts']),('cooldown','010',3))
+            server.init()  # Saved cursor survives reinitialization.
+            self.assertEqual(server.status('alice')['progress']['0'],3)
+            now+=10.01
+            second=self.run_job(0)
+            self.assertEqual(second['start_index'],3)
+            self.assertEqual((second['state'],second['attempts'],second['found']),('success',3,'101'))
+            self.assertEqual(server.status('alice')['progress']['0'],0)
+
+    def test_seek_generation_matches_exhaustive_dictionary(self):
+        from itertools import product
+        for alphabet,length in [('01',3),('1234',4),('abc',3)]:
+            expected=[''.join(p) for p in product(alphabet,repeat=length)]
+            for start in [0,1,2,5,len(expected)//2,len(expected)-1,len(expected)]:
+                self.assertEqual(list(server.candidates(alphabet,length,start)),expected[start:])
+        # A very large saved index does not require enumerating its predecessors.
+        self.assertEqual(next(server.candidates('01',40,2**40-1)),'1'*40)
+
+    def test_speed_protection_shared_and_independent_of_rate_limit(self):
+        self.post('/api/protection',user='alice',enabled=False)
+        self.post('/api/protection',user='alice',setting='speed_protection',enabled=True)
+        now=1000
+        with patch('server.time.time',side_effect=lambda:now):
+            self.post('/api/login',user='alice',kind=0,password='wrong')
+            now+=.1
+            self.post('/api/login',user='alice',kind=1,password='wrong')
+            now+=.1
+            result=self.post('/api/login',user='alice',kind=2,password='a+').get_json()
+            self.assertEqual(result['state'],'blocked')
+            self.assertIn('500 ms',result['account']['block_reason'])
+            self.assertEqual(result['account']['failures'],0)
+            self.post('/api/protection',user='alice',setting='speed_protection',enabled=False)
+            self.assertEqual(self.post('/api/login',user='alice',kind=0,password='101').get_json()['state'],'blocked')
+            self.post('/api/unlock',user='alice')
+            self.assertEqual(server.status('alice')['block_reason'],'')
+            self.assertEqual(self.post('/api/login',user='alice',kind=0,password='101').get_json()['state'],'success')
+
+    def test_speed_detector_accepts_human_cadence(self):
+        self.post('/api/protection',user='alice',enabled=False)
+        self.post('/api/protection',user='alice',setting='speed_protection',enabled=True)
+        now=1000
+        with patch('server.time.time',side_effect=lambda:now):
+            for i in range(5):
+                self.assertEqual(self.post('/api/login',user='alice',kind=i%3,password='wrong').get_json()['state'],'failure')
+                now+=.6
+        self.assertFalse(server.status('alice')['blocked'])
+
+    def test_speed_detector_stops_worker_and_shares_manual_history(self):
+        self.post('/api/protection',user='alice',enabled=False)
+        self.post('/api/protection',user='alice',setting='speed_protection',enabled=True)
+        with patch('server.time.time',return_value=1000):
+            self.post('/api/login',user='alice',kind=1,password='wrong')
+            job=self.run_job(0)
+        self.assertEqual((job['state'],job['attempts']),('blocked',2))
+        self.assertIn('Activité automatisée',server.status('alice')['block_reason'])
+
+    def test_attack_connect_creates_session_without_second_attempt(self):
+        self.post('/api/protection',user='alice',enabled=False)
+        with patch('server.threading.Thread'):
+            jid=self.post('/api/attack',user='alice',kind=0).get_json()['id']
+        self.assertEqual(self.post(f'/api/attack/{jid}/connect').status_code,400)
+        server.worker(server.JOBS[jid])
+        stranger=server.app.test_client()
+        self.assertEqual(stranger.post(f'/api/attack/{jid}/connect',json={}).status_code,400)
+        self.assertEqual(stranger.get(f'/api/attack/{jid}').status_code,400)
+        self.assertEqual(self.post(f'/api/attack/{jid}/connect').get_json()['current'],'alice')
+        self.assertEqual(self.client.get('/api/messages').status_code,200)
+        self.assertEqual(server.status('alice')['failures'],0)
+        self.post('/api/logout')
+        self.assertEqual(self.post(f'/api/attack/{jid}/connect').status_code,400)
+
+    def test_progress_is_separate_per_account_and_type_and_unlock_resets_it(self):
+        server.save_progress('alice',0,3)
+        server.save_progress('alice',1,6)
+        server.save_progress('bob',0,2)
+        self.assertEqual(server.status('alice')['progress'],{'0':3,'1':6})
+        self.post('/api/unlock',user='alice')
+        self.assertEqual(server.status('alice')['progress'],{})
+        self.assertEqual(server.status('bob')['progress'],{'0':2})
 
     def test_session_messages_and_recipient_only_decryption(self):
         self.assertEqual(self.client.get('/api/messages').status_code,400)

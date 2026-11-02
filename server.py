@@ -1,6 +1,7 @@
 import hashlib
 import itertools
 import json
+import logging
 import secrets
 import sqlite3
 import string
@@ -36,7 +37,12 @@ def digest(salt, password):
 def init():
     with db() as c:
         c.executescript('''CREATE TABLE IF NOT EXISTS users(name TEXT PRIMARY KEY, salt TEXT, hashes TEXT, length INTEGER, failures INTEGER DEFAULT 0, until REAL DEFAULT 0, blocked INTEGER DEFAULT 0, protection INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, sender TEXT, recipient TEXT, algorithm TEXT, params TEXT, ciphertext TEXT, created REAL);''')
+        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, sender TEXT, recipient TEXT, algorithm TEXT, params TEXT, ciphertext TEXT, created REAL);
+        CREATE TABLE IF NOT EXISTS attack_progress(name TEXT, kind INTEGER, next_index INTEGER DEFAULT 0, PRIMARY KEY(name,kind));''')
+        columns = {r['name'] for r in c.execute('PRAGMA table_info(users)')}
+        for column, definition in [('speed_protection','INTEGER DEFAULT 0'),('block_reason',"TEXT DEFAULT ''"),('recent_attempts',"TEXT DEFAULT '[]'")]:
+            if column not in columns:
+                c.execute(f'ALTER TABLE users ADD COLUMN {column} {definition}')
         for name, passwords in DEMO.items():
             salt = secrets.token_hex(16)
             c.execute('INSERT OR IGNORE INTO users(name,salt,hashes,length) VALUES(?,?,?,?)',(name,salt,json.dumps([digest(salt,p) for p in passwords]),len(passwords[2])))
@@ -47,22 +53,52 @@ def user(name):
 def status(name):
     u = user(name)
     if u is None: raise ValueError('Compte inconnu.')
-    return {k:u[k] for k in ('name','failures','blocked','protection','length')} | {'remaining':max(0,u['until']-time.time())}
+    with db() as c:
+        progress = {str(r['kind']):r['next_index'] for r in c.execute('SELECT kind,next_index FROM attack_progress WHERE name=?',(name,))}
+    return {k:u[k] for k in ('name','failures','blocked','protection','speed_protection','block_reason','length')} | {'remaining':max(0,u['until']-time.time()), 'progress':progress}
 
 def attempt(name, kind, password):
     with LOCK:
         u = user(name)
-        if u['blocked']: return {'state':'blocked'}
-        if u['until'] > time.time(): return {'state':'cooldown'}
+        if u['blocked']: return {'state':'blocked','consumed':False}
+        now = time.time()
+        if u['until'] > now: return {'state':'cooldown','consumed':False}
+        if u['speed_protection']:
+            recent = [t for t in json.loads(u['recent_attempts']) if now-t < 0.5]
+            recent.append(now)
+            with db() as c:
+                c.execute('UPDATE users SET recent_attempts=? WHERE name=?',(json.dumps(recent),name))
+                if len(recent) >= 3:
+                    reason = 'Activité automatisée détectée : 3 tentatives en moins de 500 ms, une cadence inhumaine.'
+                    c.execute('UPDATE users SET blocked=1,block_reason=? WHERE name=?',(reason,name))
+                    return {'state':'blocked','consumed':True,'reason':reason}
         if secrets.compare_digest(digest(u['salt'],password),json.loads(u['hashes'])[kind]):
-            with db() as c: c.execute('UPDATE users SET failures=0,until=0 WHERE name=?',(name,))
-            return {'state':'success'}
+            with db() as c: c.execute("UPDATE users SET failures=0,until=0,recent_attempts='[]' WHERE name=?",(name,))
+            return {'state':'success','consumed':True}
         if u['protection']:
             count = u['failures']+1
             with db() as c:
-                c.execute('UPDATE users SET failures=?,until=?,blocked=? WHERE name=?',(count,time.time()+10 if count%3==0 and count<9 else 0,int(count>=9),name))
-            return {'state':'blocked' if count>=9 else 'cooldown' if count%3==0 else 'failure'}
-        return {'state':'failure'}
+                c.execute('UPDATE users SET failures=?,until=?,blocked=?,block_reason=? WHERE name=?',(count,now+10 if count%3==0 and count<9 else 0,int(count>=9),'Rate limiting : 9 échecs de connexion sur ce compte.' if count>=9 else '',name))
+            return {'state':'blocked' if count>=9 else 'cooldown' if count%3==0 else 'failure','consumed':True}
+        return {'state':'failure','consumed':True}
+
+def candidates(alphabet, length, start):
+    """Jump directly to the saved index, then enumerate suffixes in C, without replay."""
+    if start >= len(alphabet)**length:
+        return
+    digits = [0]*length
+    for i in range(length-1,-1,-1):
+        start, digits[i] = divmod(start,len(alphabet))
+    yield ''.join(alphabet[d] for d in digits)
+    for pivot in range(length-1,-1,-1):
+        prefix = ''.join(alphabet[d] for d in digits[:pivot])
+        for digit in range(digits[pivot]+1,len(alphabet)):
+            for suffix in itertools.product(alphabet,repeat=length-pivot-1):
+                yield prefix+alphabet[digit]+''.join(suffix)
+
+def save_progress(name, kind, index):
+    with db() as c:
+        c.execute('INSERT INTO attack_progress(name,kind,next_index) VALUES(?,?,?) ON CONFLICT(name,kind) DO UPDATE SET next_index=excluded.next_index',(name,kind,index))
 
 def worker(job):
     start = time.perf_counter()
@@ -70,15 +106,15 @@ def worker(job):
     alphabet = '01' if kind==0 else '1234' if kind==1 else ALPHABET
     length = 3 if kind==0 else 4 if kind==1 else u['length']
     target = json.loads(u['hashes'])[kind]; salt=u['salt']
+    next_index = job.get('start_index',0)
     try:
-        for chars in itertools.product(alphabet,repeat=length):
+        for candidate in candidates(alphabet,length,next_index):
             if job['cancel']: job['state']='cancelled'; break
-            candidate = ''.join(chars)
             # Protected path uses precisely the same atomic operation as manual login.
             # Unprotected path avoids SQLite per candidate; recheck policy every 128 guesses.
             if job['attempts']%128==0:
                 u=user(job['user'])
-            if u['protection'] or u['blocked'] or u['until']>time.time():
+            if u['protection'] or u['speed_protection'] or u['blocked'] or u['until']>time.time():
                 with LOCK:
                     current=status(job['user'])
                     if current['blocked'] or current['remaining']>0:
@@ -86,9 +122,11 @@ def worker(job):
                         break
                     result=attempt(job['user'],kind,candidate)
             else:
-                result={'state':'success' if secrets.compare_digest(digest(salt,candidate),target) else 'failure'}
+                result={'state':'success' if secrets.compare_digest(digest(salt,candidate),target) else 'failure','consumed':True}
                 if result['state']=='success': result=attempt(job['user'],kind,candidate)
-            job['attempts']+=1; job['candidate']=candidate
+            if result.get('consumed',True):
+                job['attempts']+=1; job['candidate']=candidate
+                next_index+=1
             if result['state']!='failure':
                 job['state']=result['state']
                 if result['state']=='success': job['found']=candidate
@@ -97,6 +135,9 @@ def worker(job):
     except Exception:
         job['state']='error'
     finally:
+        with LOCK:
+            save_progress(job['user'],kind,0 if job['state']=='success' else next_index)
+        job['next_index']=next_index
         job['elapsed']=time.perf_counter()-start
 
 @app.errorhandler(ValueError)
@@ -111,7 +152,11 @@ def state(): return jsonify(users=[status(n) for n in DEMO], current=session.get
 @app.post('/api/protection')
 def protection():
     data=request.get_json(); name=data['user']; status(name)
-    with LOCK, db() as c: c.execute('UPDATE users SET protection=? WHERE name=?',(int(bool(data['enabled'])),name))
+    setting=data.get('setting','protection')
+    if setting not in ('protection','speed_protection'): raise ValueError('Protection inconnue.')
+    with LOCK, db() as c:
+        if any(j['state']=='running' and j['user']==name for j in JOBS.values()): raise ValueError('Arrêtez l’attaque avant de modifier les protections.')
+        c.execute(f"UPDATE users SET {setting}=?,recent_attempts='[]' WHERE name=?",(int(bool(data['enabled'])),name))
     return jsonify(status(name))
 
 @app.post('/api/unlock')
@@ -120,7 +165,9 @@ def unlock():
     with LOCK:
         for j in JOBS.values():
             if j['user']==name and j['state']=='running': raise ValueError('Arrêtez l’attaque avant de débloquer le compte.')
-        with db() as c: c.execute('UPDATE users SET failures=0,until=0,blocked=0 WHERE name=?',(name,))
+        with db() as c:
+            c.execute("UPDATE users SET failures=0,until=0,blocked=0,block_reason='',recent_attempts='[]' WHERE name=?",(name,))
+            c.execute('DELETE FROM attack_progress WHERE name=?',(name,))
     return jsonify(status(name))
 
 @app.post('/api/login')
@@ -142,8 +189,12 @@ def attack():
     if kind not in (0,1,2): raise ValueError('Type invalide.')
     with LOCK:
         if any(j['state']=='running' and j['user']==name for j in JOBS.values()): raise ValueError('Une attaque est déjà en cours pour ce compte.')
+        if status(name)['blocked'] or status(name)['remaining']>0: raise ValueError('Le compte est bloqué ou en pause de sécurité.')
+        with db() as c:
+            saved=c.execute('SELECT next_index FROM attack_progress WHERE name=? AND kind=?',(name,kind)).fetchone()
+        start_index=saved['next_index'] if saved else 0
         jid=secrets.token_urlsafe(20)
-        job={'id':jid,'user':name,'kind':kind,'state':'running','attempts':0,'candidate':'','found':None,'elapsed':0,'cancel':False}
+        job={'id':jid,'user':name,'kind':kind,'state':'running','attempts':0,'candidate':'','found':None,'elapsed':0,'cancel':False,'start_index':start_index,'next_index':start_index,'owner':session.setdefault('attack_owner',secrets.token_urlsafe(24))}
         JOBS[jid]=job
         threading.Thread(target=worker,args=(job,),daemon=True).start()
     return jsonify(id=jid)
@@ -152,8 +203,21 @@ def attack():
 def job(jid):
     if jid not in JOBS: raise ValueError('Attaque inconnue.')
     j=JOBS[jid]
+    if j.get('owner') != session.get('attack_owner'): raise ValueError('Cette attaque appartient à une autre session.')
     if request.method=='DELETE': j['cancel']=True
-    return jsonify({k:v for k,v in j.items() if k!='cancel'})
+    return jsonify({k:v for k,v in j.items() if k not in ('cancel','owner')})
+
+@app.post('/api/attack/<jid>/connect')
+def attack_connect(jid):
+    with LOCK:
+        j=JOBS.get(jid)
+        if not j or j.get('owner') != session.get('attack_owner'): raise ValueError('Attaque inconnue pour cette session.')
+        if j['state']!='success' or j.get('claimed'): raise ValueError('Aucune authentification réussie à valider.')
+        u=status(j['user'])
+        if u['blocked'] or u['remaining']>0: raise ValueError('Le compte est actuellement bloqué ou en pause.')
+        j['claimed']=True
+        session['user']=j['user']
+    return jsonify(current=j['user'])
 
 def authenticated():
     if session.get('user') not in DEMO: raise ValueError('Connectez-vous pour accéder à la messagerie.')
@@ -188,5 +252,6 @@ def headers(response):
 
 init()
 if __name__=='__main__':
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
     print('SSAD Cipher Lab : http://127.0.0.1:5000',flush=True)
     app.run(host='127.0.0.1',port=5000,threaded=True,debug=False)
